@@ -55,6 +55,7 @@ export const ContainerMixin = {
         height: node.offsetHeight,
       }),
     },
+    autoScrollEdges: { type: [String, Number, Array], default: '0%' },
   },
 
   provide() {
@@ -100,10 +101,7 @@ export const ContainerMixin = {
       }
 
       this._touched = true;
-      this._pos = {
-        x: e.pageX,
-        y: e.pageY,
-      };
+      this._pos = this.getPosition(e);
 
       const node = closest(e.target, el => el.sortableInfo != null);
 
@@ -153,16 +151,18 @@ export const ContainerMixin = {
       const {distance, pressThreshold} = this.$props;
 
       if (!this.sorting && this._touched) {
-        this._delta = {
-          x: this._pos.x - e.pageX,
-          y: this._pos.y - e.pageY,
-        };
-        const delta = Math.abs(this._delta.x) + Math.abs(this._delta.y);
+        const position = this.getPosition(e);
 
-        if (!distance && (!pressThreshold || pressThreshold && delta >= pressThreshold)) {
+        const delta = this._delta = {
+          x: this._pos.x - position.x,
+          y: this._pos.y - position.y,
+        };
+        const combinedDelta = Math.abs(delta.x) + Math.abs(delta.y);
+
+        if (!distance && (!pressThreshold || pressThreshold && combinedDelta >= pressThreshold)) {
           clearTimeout(this.cancelTimer);
           this.cancelTimer = setTimeout(this.cancel, 0);
-        } else if (distance && delta >= distance && this.manager.isActive()) {
+        } else if (distance && combinedDelta >= distance && this.manager.isActive()) {
           this.handlePress(e);
         }
       }
@@ -222,7 +222,7 @@ export const ContainerMixin = {
           y: axis.indexOf('y') >= 0,
         };
         this.offsetEdge = this.getEdgeOffset(node);
-        this.initialOffset = this.getOffset(e);
+        this.initialOffset = this.getPosition(e);
         this.initialScroll = {
           top: this.container.scrollTop,
           left: this.container.scrollLeft,
@@ -283,7 +283,7 @@ export const ContainerMixin = {
             this.boundingClientRect.top -
             this.height / 2;
           this.maxTranslate.y = (useWindowAsScrollContainer
-            ? this._window.innerHeight
+            ?  this._window.innerHeight
             : containerBoundingRect.top + containerBoundingRect.height) -
             this.boundingClientRect.top -
             this.height / 2;
@@ -310,6 +310,15 @@ export const ContainerMixin = {
         this.sorting = true;
         this.sortingIndex = index;
 
+        // Add Scroll Edges
+        const [topAutoScrollOffset, bottomAutoScrollOffset] = this.getAutoScrollPixelOffsets();
+        this.autoScrollEdgeOffsets = {
+          top: topAutoScrollOffset || 0,
+          bottom: bottomAutoScrollOffset || 0,
+        };
+        this.minTranslate.y += this.autoScrollEdgeOffsets.top.y;
+        this.maxTranslate.y += this.autoScrollEdgeOffsets.bottom.y;
+
         this.$emit('sort-start', {event: e, node, index, collection});
       }
     },
@@ -325,6 +334,7 @@ export const ContainerMixin = {
     },
 
     handleSortEnd(e) {
+
       const {collection} = this.manager.active;
 
       // Remove the event listeners if the node is still in the DOM
@@ -383,27 +393,38 @@ export const ContainerMixin = {
       };
 
       if (this.$props.transitionDuration || this.$props.draggedSettlingDuration) {
-        this.transitionHelperIntoPlace(nodes).then(() => onEnd());
+        this.transitionHelperIntoPlace(e, nodes).then(() => onEnd());
       } else {
         onEnd();
       }
 
     },
 
-    transitionHelperIntoPlace(nodes) {
+    transitionHelperIntoPlace(e, nodes) {
+
       if (this.$props.draggedSettlingDuration === 0) {
         return Promise.resolve();
       }
 
-      const deltaScroll = {
-        left: this.scrollContainer.scrollLeft - this.initialScroll.left,
-        top: this.scrollContainer.scrollTop - this.initialScroll.top,
+      const offset = this.getPosition(e);
+
+      const translate = {
+        x: offset.x - this.scrollContainer.scrollLeft,
+        y: offset.y - this.scrollContainer.scrollTop,
       };
+
+      const deltaScroll = {
+        left: this.initialWindowScroll.left - this.scrollContainer.scrollLeft,
+        top: this.initialWindowScroll.top - this.scrollContainer.scrollTop,
+      };
+
+      let targetX = deltaScroll.left;
+      let targetY = deltaScroll.top;
+
       const indexNode = nodes[this.index].node;
       const newIndexNode = nodes[this.newIndex].node;
 
-      let targetX = -deltaScroll.left;
-      if (this.translate.x > 0) {
+      if (translate.x > 0) {
         // Diff against right edge when moving to the right
         targetX += newIndexNode.offsetLeft + newIndexNode.offsetWidth -
           (indexNode.offsetLeft + indexNode.offsetWidth);
@@ -411,8 +432,7 @@ export const ContainerMixin = {
         targetX += newIndexNode.offsetLeft - indexNode.offsetLeft;
       }
 
-      let targetY = -deltaScroll.top;
-      if (this.translate.y > 0) {
+      if (translate.y > 0) {
         // Diff against the bottom edge when moving down
         targetY += newIndexNode.offsetTop + newIndexNode.offsetHeight -
           (indexNode.offsetTop + indexNode.offsetHeight);
@@ -426,8 +446,7 @@ export const ContainerMixin = {
 
       this.helper.style[`${vendorPrefix}Transform`] = `translate3d(${targetX}px,${targetY}px, 0)`;
       this.helper.style[
-        `${vendorPrefix}TransitionDuration`
-      ] = `${duration}ms`;
+        `${vendorPrefix}TransitionDuration`] = `${duration}ms`;
 
       return new Promise(resolve => {
         // Register an event handler to clean up styles when the transition
@@ -469,25 +488,26 @@ export const ContainerMixin = {
     },
 
     getLockPixelOffsets() {
+      const {width, height} = this;
       let {lockOffset} = this.$props;
 
-      if (!Array.isArray(this.lockOffset)) {
-        lockOffset = [lockOffset, lockOffset];
-      }
+      const offsets = Array.isArray(lockOffset)
+        ? lockOffset
+        : [lockOffset, lockOffset];
 
-      if (lockOffset.length !== 2) {
+      if (offsets.length !== 2) {
         throw new Error(`lockOffset prop of SortableContainer should be a single value or an array of exactly two values. Given ${lockOffset}`);
       }
 
-      const [minLockOffset, maxLockOffset] = lockOffset;
+      const [minLockOffset, maxLockOffset] = offsets;
 
       return [
-        this.getLockPixelOffset(minLockOffset),
-        this.getLockPixelOffset(maxLockOffset),
+        this.getLockPixelOffset({lockOffset: minLockOffset, width, height}),
+        this.getLockPixelOffset({lockOffset: maxLockOffset, width, height}),
       ];
     },
 
-    getLockPixelOffset(lockOffset) {
+    getLockPixelOffset({lockOffset, width, height}) {
       let offsetX = lockOffset;
       let offsetY = lockOffset;
       let unit = 'px';
@@ -508,8 +528,8 @@ export const ContainerMixin = {
       }
 
       if (unit === '%') {
-        offsetX = offsetX * this.width / 100;
-        offsetY = offsetY * this.height / 100;
+        offsetX = offsetX * width / 100;
+        offsetY = offsetY * height / 100;
       }
 
       return {
@@ -521,7 +541,7 @@ export const ContainerMixin = {
     updatePosition(e) {
       const {lockAxis, lockToContainerEdges} = this.$props;
 
-      const offset = this.getOffset(e);
+      const offset = this.getPosition(e);
       const translate = {
         x: offset.x - this.initialOffset.x,
         y: offset.y - this.initialOffset.y,
@@ -728,6 +748,7 @@ export const ContainerMixin = {
     },
 
     autoscroll() {
+
       const translate = this.translate;
       const direction = {
         x: 0,
@@ -742,18 +763,20 @@ export const ContainerMixin = {
         y: 10,
       };
 
-      if (translate.y >= this.maxTranslate.y - this.height / 2) {
+      const limitWeight = 1.5;
+
+      if (translate.y >= this.maxTranslate.y - this.height * limitWeight) {
         direction.y = 1; // Scroll Down
-        speed.y = acceleration.y * Math.abs((this.maxTranslate.y - this.height / 2 - translate.y) / this.height);
-      } else if (translate.x >= this.maxTranslate.x - this.width / 2) {
+        speed.y = acceleration.y * Math.abs((this.maxTranslate.y - this.height * limitWeight - translate.y) / this.height);
+      } else if (translate.x >= this.maxTranslate.x - this.width * limitWeight ) {
         direction.x = 1; // Scroll Right
-        speed.x = acceleration.x * Math.abs((this.maxTranslate.x - this.width / 2 - translate.x) / this.width);
-      } else if (translate.y <= this.minTranslate.y + this.height / 2) {
+        speed.x = acceleration.x * Math.abs((this.maxTranslate.x - this.width * limitWeight - translate.x) / this.width);
+      } else if (translate.y <= this.minTranslate.y + this.height * limitWeight ) {
         direction.y = -1; // Scroll Up
-        speed.y = acceleration.y * Math.abs((translate.y - this.height / 2 - this.minTranslate.y) / this.height);
-      } else if (translate.x <= this.minTranslate.x + this.width / 2) {
+        speed.y = acceleration.y * Math.abs((translate.y - this.height * limitWeight - this.minTranslate.y) / this.height);
+      } else if (translate.x <= this.minTranslate.x + this.width * limitWeight ) {
         direction.x = -1; // Scroll Left
-        speed.x = acceleration.x * Math.abs((translate.x - this.width / 2 - this.minTranslate.x) / this.width);
+        speed.x = acceleration.x * Math.abs((translate.x - this.width * limitWeight - this.minTranslate.x) / this.width);
       }
 
       if (this.autoscrollInterval) {
@@ -780,5 +803,73 @@ export const ContainerMixin = {
         );
       }
     },
+
+    getAutoScrollPixelOffsets() {
+      let {autoScrollEdges} = this.$props;
+
+      if (!Array.isArray(this.autoScrollEdges)) {
+        autoScrollEdges = [autoScrollEdges, autoScrollEdges];
+      }
+
+      if (autoScrollEdges.length !== 2) {
+        throw new Error(`autoScrollEdges prop of SortableContainer should be a single value or an array of exactly two values. Given ${autoScrollEdges}`);
+      }
+
+      const [minAutoScrollOffset, maxAutoScrollOffset] = autoScrollEdges;
+
+      return [
+        this.getAutoScrollPixelOffset(minAutoScrollOffset),
+        this.getAutoScrollPixelOffset(maxAutoScrollOffset),
+      ];
+    },
+
+    getAutoScrollPixelOffset(autoScrollOffset) {
+      let offsetX = autoScrollOffset;
+      let offsetY = autoScrollOffset;
+      let unit = 'px';
+
+      if (typeof autoScrollOffset === 'string') {
+        const match = /^[+-]?\d*(?:\.\d*)?(px|%)$/.exec(autoScrollOffset);
+
+        if (match === null) {
+          throw new Error(`autoScrollOffset value should be a number or a string of a number followed by "px" or "%". Given ${autoScrollOffset}`);
+        }
+
+        offsetX = (offsetY = parseFloat(autoScrollOffset));
+        unit = match[1];
+      }
+
+      if (!isFinite(offsetX) || !isFinite(offsetY)) {
+        throw new Error(`autoScrollOffset value should be a finite. Given ${autoScrollOffset}`);
+      }
+
+      if (unit === '%') {
+        offsetX = offsetX * this._window.innerWidth / 100;
+        offsetY = offsetY * this._window.innerHeight / 100;
+      }
+
+      return {
+        x: offsetX,
+        y: offsetY,
+      };
+    },
+    getPosition(event) {
+      if (event.touches && event.touches.length) {
+        return {
+          x: event.touches[0].pageX,
+          y: event.touches[0].pageY,
+        };
+      } else if (event.changedTouches && event.changedTouches.length) {
+        return {
+          x: event.changedTouches[0].pageX,
+          y: event.changedTouches[0].pageY,
+        };
+      } else {
+        return {
+          x: event.pageX,
+          y: event.pageY,
+        };
+      }
+    }
   },
 };
